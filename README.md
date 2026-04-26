@@ -348,6 +348,7 @@ python scripts/download_mt5_data.py \
 # Optional symbol mapping override
 python scripts/download_mt5_data.py --source yfinance --symbol XAUUSD --map XAUUSD:XAUUSD=X --timeframe H1
 ```
+Using `--source yfinance` or `--source dukascopy` does not require the `MetaTrader5` Python package.
 
 #### F. External Source Download (Dukascopy + cache, free)
 ```bash

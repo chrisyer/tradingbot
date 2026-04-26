@@ -17,18 +17,17 @@ from pathlib import Path
 from urllib.parse import urlencode
 from urllib.request import urlopen
 
-import MetaTrader5 as mt5
 import pandas as pd
 
 
-TIMEFRAME_MAP = {
-    "M1": mt5.TIMEFRAME_M1,
-    "M5": mt5.TIMEFRAME_M5,
-    "M15": mt5.TIMEFRAME_M15,
-    "M30": mt5.TIMEFRAME_M30,
-    "H1": mt5.TIMEFRAME_H1,
-    "H4": mt5.TIMEFRAME_H4,
-    "D1": mt5.TIMEFRAME_D1,
+MT5_TIMEFRAME_ATTR = {
+    "M1": "TIMEFRAME_M1",
+    "M5": "TIMEFRAME_M5",
+    "M15": "TIMEFRAME_M15",
+    "M30": "TIMEFRAME_M30",
+    "H1": "TIMEFRAME_H1",
+    "H4": "TIMEFRAME_H4",
+    "D1": "TIMEFRAME_D1",
 }
 
 TIMEFRAME_SECONDS = {
@@ -92,8 +91,19 @@ def read_existing(csv_path: Path) -> pd.DataFrame | None:
     return df.reset_index(drop=True)
 
 
-def fetch_range(symbol: str, timeframe: str, start_dt: datetime, end_dt: datetime) -> pd.DataFrame:
-    tf = TIMEFRAME_MAP[timeframe]
+def get_mt5_module():
+    try:
+        import MetaTrader5 as mt5
+    except ModuleNotFoundError as exc:
+        raise RuntimeError(
+            "MetaTrader5 package is required only when --source mt5 is used. "
+            "Install with: pip install MetaTrader5"
+        ) from exc
+    return mt5
+
+
+def fetch_range_mt5(mt5, symbol: str, timeframe: str, start_dt: datetime, end_dt: datetime) -> pd.DataFrame:
+    tf = getattr(mt5, MT5_TIMEFRAME_ATTR[timeframe])
     rates = mt5.copy_rates_range(symbol, tf, start_dt, end_dt)
     if rates is None:
         raise RuntimeError(f"MT5 copy_rates_range failed for {symbol} {timeframe}: {mt5.last_error()}")
@@ -249,6 +259,7 @@ def incremental_update(
     full_refresh: bool,
     fallback_days: int,
     source: str,
+    mt5=None,
 ) -> None:
     csv_path = out_dir / target.output_filename
     cache_path = cache_dir / target.cache_filename
@@ -263,7 +274,7 @@ def incremental_update(
 
     provider_symbol = target.provider_symbol or target.symbol
     if source == "mt5":
-        fetched = fetch_range(target.symbol, target.timeframe, effective_from, to_dt)
+        fetched = fetch_range_mt5(mt5, target.symbol, target.timeframe, effective_from, to_dt)
     elif source == "yfinance":
         fetched = fetch_range_yfinance(provider_symbol, target.timeframe, effective_from, to_dt)
     else:
@@ -275,7 +286,7 @@ def incremental_update(
             f"{effective_from} -> {to_dt}. Trying fallback window ({fallback_days}d)..."
         )
         if source == "mt5":
-            fetched = fetch_range(target.symbol, target.timeframe, fallback_from, to_dt)
+            fetched = fetch_range_mt5(mt5, target.symbol, target.timeframe, fallback_from, to_dt)
         elif source == "yfinance":
             fetched = fetch_range_yfinance(provider_symbol, target.timeframe, fallback_from, to_dt)
         else:
@@ -346,8 +357,8 @@ def main():
     timeframes = [t.upper() for t in args.timeframe]
 
     for tf in timeframes:
-        if tf not in TIMEFRAME_MAP:
-            raise ValueError(f"Unsupported timeframe: {tf}. Allowed: {sorted(TIMEFRAME_MAP.keys())}")
+        if tf not in TIMEFRAME_SECONDS:
+            raise ValueError(f"Unsupported timeframe: {tf}. Allowed: {sorted(TIMEFRAME_SECONDS.keys())}")
 
     from_dt = parse_dt(args.from_dt)
     to_dt = parse_dt(args.to_dt)
@@ -369,7 +380,9 @@ def main():
     }
 
     mt5_ready = False
+    mt5 = None
     if args.source == "mt5":
+        mt5 = get_mt5_module()
         if not mt5.initialize():
             raise RuntimeError(f"Failed to initialize MT5: {mt5.last_error()}")
         mt5_ready = True
@@ -389,6 +402,7 @@ def main():
                     full_refresh=args.full_refresh,
                     fallback_days=args.fallback_days,
                     source=args.source,
+                    mt5=mt5,
                 )
     finally:
         if mt5_ready:
