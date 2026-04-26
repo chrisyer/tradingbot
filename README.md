@@ -351,6 +351,11 @@ python train/train_ultimate_150.py --steps 1000000 --device cuda --batch-size 12
 python train/train_ultimate_150.py --steps 1000000 --device cpu --batch-size 32
 ```
 
+Backward-compatible alias (kept for older branches/scripts):
+```bash
+python train/train_pro.py --steps 1000000 --device mps --batch-size 64
+```
+
 **Training time:**
 - Mac M1/M2/M3: 6-8 days
 - NVIDIA RTX 3080+: 2-3 days
@@ -433,6 +438,7 @@ python live_trade_metaapi.py
 tradingbot/
 │
 ├── 📂 train/                    # Training scripts & saved models
+│   ├── train_pro.py            # Backward-compatible alias to train_ultimate_150.py
 │   ├── train_ultimate_150.py   # Main training script (140+ features)
 │   ├── train_god_mode.py       # God mode training (63 features)
 │   ├── train_dreamer.py        # Dreamer V3 training
