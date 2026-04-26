@@ -43,7 +43,9 @@ def evaluate_model(model: PPO, env: XAUUSDTradingEnv) -> dict[str, float]:
     }
 
 
-def build_train_test_data(data_path: str, window: int, train_end_date: str):
+def build_train_test_data(
+    data_path: str, window: int, train_end_date: str
+) -> tuple[np.ndarray, np.ndarray, np.ndarray, np.ndarray]:
     # Keep normalize=False here and fit stats on train split only to avoid leakage.
     df, features_raw, returns = make_features(data_path, window=window, normalize=False)
     train_end = np.searchsorted(df["time"].to_numpy(), np.datetime64(train_end_date))
