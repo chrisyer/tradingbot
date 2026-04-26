@@ -12,8 +12,16 @@ from features.make_features import make_features
 
 
 def load_asset_dataset(symbol: str, csv_path: str, window: int, train_end_date: str) -> tuple[AssetDataset, AssetDataset]:
+    # NOTE: keep normalize=False here, then fit normalization stats on train split only
+    # to avoid train/test leakage.
     df, features_raw, returns = make_features(csv_path, window=window, normalize=False)
     train_end = np.searchsorted(df["time"].to_numpy(), np.datetime64(train_end_date))
+    if train_end <= 0 or train_end >= len(features_raw):
+        raise ValueError(
+            f"Invalid train split for {symbol}: train_end={train_end}, total={len(features_raw)}. "
+            f"Check --train-end ({train_end_date}) against dataset timestamps."
+        )
+
     x_train_raw = features_raw[:train_end]
     x_test_raw = features_raw[train_end:]
     mu = x_train_raw.mean(axis=0, keepdims=True)
