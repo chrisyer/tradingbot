@@ -11,7 +11,9 @@ from env.xauusd_env import XAUUSDTradingEnv
 from features.make_features import make_features
 
 
-def split_data(data_path: str, window: int, train_end_date: str):
+def split_data(
+    data_path: str, window: int, train_end_date: str
+) -> tuple[np.ndarray, np.ndarray, np.ndarray, np.ndarray]:
     # Keep normalize=False here and fit stats on train split only to avoid leakage.
     df, x_raw, r = make_features(data_path, window=window, normalize=False)
     train_end = np.searchsorted(df["time"].to_numpy(), np.datetime64(train_end_date))
