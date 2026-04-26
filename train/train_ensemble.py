@@ -11,10 +11,23 @@ from env.xauusd_env import XAUUSDTradingEnv
 from features.make_features import make_features
 
 
-def split_data(data_path: str, window: int, train_end_date: str):
-    df, x, r = make_features(data_path, window=window)
+def split_data(
+    data_path: str, window: int, train_end_date: str
+) -> tuple[np.ndarray, np.ndarray, np.ndarray, np.ndarray]:
+    # Keep normalize=False here and fit stats on train split only to avoid leakage.
+    df, x_raw, r = make_features(data_path, window=window, normalize=False)
     train_end = np.searchsorted(df["time"].to_numpy(), np.datetime64(train_end_date))
-    return x[:train_end], r[:train_end], x[train_end:], r[train_end:]
+    if train_end <= 0 or train_end >= len(x_raw):
+        raise ValueError(
+            f"Invalid train split: train_end={train_end}, total={len(x_raw)}. "
+            f"Check --train-end ({train_end_date}) against dataset timestamps."
+        )
+    x_train_raw, x_test_raw = x_raw[:train_end], x_raw[train_end:]
+    mu = x_train_raw.mean(axis=0, keepdims=True)
+    sig = x_train_raw.std(axis=0, keepdims=True) + 1e-8
+    x_train = (x_train_raw - mu) / sig
+    x_test = (x_test_raw - mu) / sig
+    return x_train, r[:train_end], x_test, r[train_end:]
 
 
 def majority_vote(actions: list[int]) -> int:

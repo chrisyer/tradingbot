@@ -327,7 +327,19 @@ data/xauusd_m15.csv  (~20-40 MB, 350k+ rows)
 
 ### Step 2: Train the Model
 
-#### Option A: Local Training (Slower but Free)
+#### Option A (Recommended for First Version): PPO Baseline
+```bash
+# Fastest way to get a stable V1 pipeline online first
+python train/train_ppo.py
+```
+
+Use this first if your goal is to validate:
+- Data pipeline
+- Training loop
+- Backtest/evaluation flow
+- Live execution integration
+
+#### Option B: PRO Model (DreamerV3 + 150+ features)
 ```bash
 # Mac with Apple Silicon
 python train/train_ultimate_150.py --steps 1000000 --device mps --batch-size 64
@@ -345,11 +357,11 @@ python train/train_ultimate_150.py --steps 1000000 --device cpu --batch-size 32
 - CPU: 15-20 days (not recommended)
 
 **Monitor progress:**
-- Models saved every 50k steps in `train/ppo_xauusd_[steps]k.zip`
+- PRO checkpoints saved under `train/dreamer_ultimate/`
 - Check training log for rewards and losses
 - Can stop/resume training anytime
 
-#### Option B: Google Colab (Faster, Recommended)
+#### Option C: Google Colab (Faster, Recommended for PRO model)
 1. Upload `colab_train_ultimate_150.ipynb` to Google Drive
 2. Open in Google Colab
 3. Runtime → Change runtime type → GPU (T4 or A100)

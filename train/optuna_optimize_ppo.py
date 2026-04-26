@@ -43,10 +43,25 @@ def evaluate_model(model: PPO, env: XAUUSDTradingEnv) -> dict[str, float]:
     }
 
 
-def build_train_test_data(data_path: str, window: int, train_end_date: str):
-    df, features, returns = make_features(data_path, window=window)
+def build_train_test_data(
+    data_path: str, window: int, train_end_date: str
+) -> tuple[np.ndarray, np.ndarray, np.ndarray, np.ndarray]:
+    # Keep normalize=False here and fit stats on train split only to avoid leakage.
+    df, features_raw, returns = make_features(data_path, window=window, normalize=False)
     train_end = np.searchsorted(df["time"].to_numpy(), np.datetime64(train_end_date))
-    return features[:train_end], returns[:train_end], features[train_end:], returns[train_end:]
+    if train_end <= 0 or train_end >= len(features_raw):
+        raise ValueError(
+            f"Invalid train split: train_end={train_end}, total={len(features_raw)}. "
+            f"Check --train-end ({train_end_date}) against dataset timestamps."
+        )
+    x_train_raw = features_raw[:train_end]
+    x_test_raw = features_raw[train_end:]
+
+    mu = x_train_raw.mean(axis=0, keepdims=True)
+    sig = x_train_raw.std(axis=0, keepdims=True) + 1e-8
+    x_train = (x_train_raw - mu) / sig
+    x_test = (x_test_raw - mu) / sig
+    return x_train, returns[:train_end], x_test, returns[train_end:]
 
 
 def optimize(
