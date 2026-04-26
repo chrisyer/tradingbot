@@ -44,8 +44,14 @@ def evaluate_model(model: PPO, env: XAUUSDTradingEnv) -> dict[str, float]:
 
 
 def build_train_test_data(data_path: str, window: int, train_end_date: str):
+    # Keep normalize=False here and fit stats on train split only to avoid leakage.
     df, features_raw, returns = make_features(data_path, window=window, normalize=False)
     train_end = np.searchsorted(df["time"].to_numpy(), np.datetime64(train_end_date))
+    if train_end <= 0 or train_end >= len(features_raw):
+        raise ValueError(
+            f"Invalid train split: train_end={train_end}, total={len(features_raw)}. "
+            f"Check --train-end ({train_end_date}) against dataset timestamps."
+        )
     x_train_raw = features_raw[:train_end]
     x_test_raw = features_raw[train_end:]
 
