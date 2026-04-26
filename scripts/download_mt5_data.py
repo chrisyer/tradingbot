@@ -4,6 +4,7 @@ Download OHLC data with incremental cache.
 Supported sources:
 - local MetaTrader 5 terminal (mt5)
 - external Yahoo Finance (yfinance)
+- external Dukascopy feed (dukascopy)
 """
 
 from __future__ import annotations
@@ -13,6 +14,8 @@ import json
 from dataclasses import dataclass
 from datetime import datetime, timedelta, timezone
 from pathlib import Path
+from urllib.parse import urlencode
+from urllib.request import urlopen
 
 import MetaTrader5 as mt5
 import pandas as pd
@@ -63,9 +66,14 @@ def parse_dt(value: str) -> datetime:
     return dt.astimezone(timezone.utc)
 
 
+def to_utc_naive(series: pd.Series, unit: str | None = None) -> pd.Series:
+    """Normalize any datetime-like series to UTC, then drop tz info for CSV consistency."""
+    return pd.to_datetime(series, errors="coerce", utc=True, unit=unit).dt.tz_convert(None)
+
+
 def normalize_bars(df: pd.DataFrame) -> pd.DataFrame:
     df = df.rename(columns={"tick_volume": "tick_volume"})
-    df["time"] = pd.to_datetime(df["time"], unit="s", utc=True).dt.tz_convert(None)
+    df["time"] = to_utc_naive(pd.to_numeric(df["time"], errors="coerce"), unit="s")
     cols = ["time", "open", "high", "low", "close", "tick_volume", "spread", "real_volume"]
     keep = [c for c in cols if c in df.columns]
     out = df[keep].copy()
@@ -79,7 +87,7 @@ def read_existing(csv_path: Path) -> pd.DataFrame | None:
     df = pd.read_csv(csv_path)
     if "time" not in df.columns:
         return None
-    df["time"] = pd.to_datetime(df["time"], errors="coerce")
+    df["time"] = to_utc_naive(df["time"])
     df = df.dropna(subset=["time"]).sort_values("time").drop_duplicates("time")
     return df.reset_index(drop=True)
 
@@ -132,9 +140,104 @@ def fetch_range_yfinance(provider_symbol: str, timeframe: str, start_dt: datetim
         }
     )
     df = df.reset_index().rename(columns={"Datetime": "time", "Date": "time"})
-    df["time"] = pd.to_datetime(df["time"], errors="coerce")
+    df["time"] = to_utc_naive(df["time"])
     keep = ["time", "open", "high", "low", "close", "tick_volume"]
     return df[[c for c in keep if c in df.columns]].dropna(subset=["time"]).sort_values("time").drop_duplicates("time").reset_index(drop=True)
+
+
+def _coerce_dukascopy_row(row) -> dict | None:
+    if isinstance(row, dict):
+        t = row.get("time", row.get("timestamp", row.get("ts", row.get("ctm"))))
+        o = row.get("open", row.get("o"))
+        h = row.get("high", row.get("h"))
+        l = row.get("low", row.get("l"))
+        c = row.get("close", row.get("c"))
+        v = row.get("volume", row.get("v", row.get("vol", 0)))
+    elif isinstance(row, list) and len(row) >= 5:
+        t = row[0]
+        o, h, l, c = row[1], row[2], row[3], row[4]
+        v = row[5] if len(row) > 5 else 0
+    else:
+        return None
+
+    if t is None or o is None or h is None or l is None or c is None:
+        return None
+    return {"time": t, "open": o, "high": h, "low": l, "close": c, "tick_volume": v}
+
+
+def fetch_range_dukascopy(provider_symbol: str, timeframe: str, start_dt: datetime, end_dt: datetime) -> pd.DataFrame:
+    if timeframe not in TIMEFRAME_SECONDS:
+        raise ValueError(f"Unsupported timeframe for dukascopy: {timeframe}")
+    interval_min = int(TIMEFRAME_SECONDS[timeframe] // 60)
+    instrument = provider_symbol.replace("/", "").upper()
+    current_end_ms = int(end_dt.timestamp() * 1000)
+    start_ms = int(start_dt.timestamp() * 1000)
+    rows = []
+
+    # Pull backward chunks until we cover requested start.
+    for _ in range(30):
+        params = {
+            "path": "chart/json3",
+            "instrument": instrument,
+            "offer_side": "BID",
+            "interval": str(interval_min),
+            "splits": "true",
+            "time_direction": "P",
+            "timestamp": str(current_end_ms),
+        }
+        url = f"https://freeserv.dukascopy.com/2.0/index.php?{urlencode(params)}"
+        with urlopen(url, timeout=30) as resp:
+            payload = resp.read().decode("utf-8", errors="replace").strip()
+
+        try:
+            chunk = json.loads(payload)
+        except json.JSONDecodeError:
+            # Some endpoints may return prefixed text; try to recover array/object.
+            left = min([i for i in [payload.find("["), payload.find("{")] if i >= 0], default=-1)
+            right = max(payload.rfind("]"), payload.rfind("}"))
+            if left < 0 or right < 0:
+                chunk = []
+            else:
+                chunk = json.loads(payload[left : right + 1])
+
+        if not chunk:
+            break
+
+        normalized = []
+        for raw in chunk:
+            one = _coerce_dukascopy_row(raw)
+            if one is not None:
+                normalized.append(one)
+        if not normalized:
+            break
+
+        rows.extend(normalized)
+        chunk_df = pd.DataFrame(normalized)
+        chunk_df["time"] = pd.to_numeric(chunk_df["time"], errors="coerce")
+        chunk_df = chunk_df.dropna(subset=["time"])
+        if chunk_df.empty:
+            break
+
+        oldest_ms = int(chunk_df["time"].min())
+        if oldest_ms <= start_ms:
+            break
+        # move back one bar
+        current_end_ms = oldest_ms - (TIMEFRAME_SECONDS[timeframe] * 1000)
+
+    if not rows:
+        return pd.DataFrame(columns=["time", "open", "high", "low", "close", "tick_volume"])
+
+    df = pd.DataFrame(rows)
+    # Accept epoch in seconds or milliseconds.
+    numeric_time = pd.to_numeric(df["time"], errors="coerce")
+    unit = "ms" if numeric_time.dropna().max() > 10_000_000_000 else "s"
+    df["time"] = to_utc_naive(numeric_time, unit=unit)
+    for col in ["open", "high", "low", "close", "tick_volume"]:
+        if col in df.columns:
+            df[col] = pd.to_numeric(df[col], errors="coerce")
+    df = df.dropna(subset=["time", "open", "high", "low", "close"])
+    df = df[(df["time"] >= start_dt.replace(tzinfo=None)) & (df["time"] <= end_dt.replace(tzinfo=None))]
+    return df.sort_values("time").drop_duplicates("time").reset_index(drop=True)
 
 
 def incremental_update(
@@ -161,8 +264,10 @@ def incremental_update(
     provider_symbol = target.provider_symbol or target.symbol
     if source == "mt5":
         fetched = fetch_range(target.symbol, target.timeframe, effective_from, to_dt)
-    else:
+    elif source == "yfinance":
         fetched = fetch_range_yfinance(provider_symbol, target.timeframe, effective_from, to_dt)
+    else:
+        fetched = fetch_range_dukascopy(provider_symbol, target.timeframe, effective_from, to_dt)
     if fetched.empty and fallback_days > 0:
         fallback_from = to_dt - timedelta(days=fallback_days)
         print(
@@ -171,13 +276,15 @@ def incremental_update(
         )
         if source == "mt5":
             fetched = fetch_range(target.symbol, target.timeframe, fallback_from, to_dt)
-        else:
+        elif source == "yfinance":
             fetched = fetch_range_yfinance(provider_symbol, target.timeframe, fallback_from, to_dt)
+        else:
+            fetched = fetch_range_dukascopy(provider_symbol, target.timeframe, fallback_from, to_dt)
     if existing is None:
         merged = fetched
     else:
         merged = pd.concat([existing, fetched], ignore_index=True)
-        merged["time"] = pd.to_datetime(merged["time"], errors="coerce")
+        merged["time"] = to_utc_naive(merged["time"])
         merged = merged.dropna(subset=["time"]).sort_values("time").drop_duplicates("time").reset_index(drop=True)
 
     out_dir.mkdir(parents=True, exist_ok=True)
@@ -223,7 +330,7 @@ def parse_args():
     parser.add_argument("--out-dir", default="data", help="Output CSV directory")
     parser.add_argument("--cache-dir", default="data/.cache/mt5_download", help="Metadata cache directory")
     parser.add_argument("--full-refresh", action="store_true", help="Ignore local CSV cache and rebuild from --from")
-    parser.add_argument("--source", choices=["mt5", "yfinance"], default="mt5", help="Data source backend")
+    parser.add_argument("--source", choices=["mt5", "yfinance", "dukascopy"], default="mt5", help="Data source backend")
     parser.add_argument(
         "--fallback-days",
         type=int,

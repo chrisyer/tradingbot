@@ -334,6 +334,7 @@ python scripts/download_mt5_data.py --symbol XAUUSD --timeframe M5 --fallback-da
 
 Cache metadata is written to `data/.cache/mt5_download/`, and CSVs are updated in `data/`.
 If your broker does not provide long history (e.g., no 2015 data), the script will keep available bars and print a warning with the actual earliest timestamp.
+All downloaded timestamps are normalized to UTC before being written to CSV.
 
 #### E. External Source Download (Yahoo Finance + cache)
 ```bash
@@ -346,6 +347,18 @@ python scripts/download_mt5_data.py \
 
 # Optional symbol mapping override
 python scripts/download_mt5_data.py --source yfinance --symbol XAUUSD --map XAUUSD:XAUUSD=X --timeframe H1
+```
+
+#### F. External Source Download (Dukascopy + cache, free)
+```bash
+python scripts/download_mt5_data.py \
+  --source dukascopy \
+  --symbol XAUUSD --symbol EURUSD \
+  --timeframe M15 --timeframe H1 \
+  --from 2015-01-01T00:00:00Z --to now
+
+# Optional mapping (e.g. ensure instrument naming)
+python scripts/download_mt5_data.py --source dukascopy --symbol XAUUSD --map XAUUSD:XAUUSD --timeframe H1
 ```
 
 **Expected files:**
