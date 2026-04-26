@@ -317,6 +317,37 @@ Creates calendar with 1,500+ major economic events (2015-2025)
 7. Click **Export** → Save as `data/xauusd_m5.csv`
 8. Repeat for **M15** → Save as `data/xauusd_m15.csv`
 
+#### D. Scripted MT5 Download (with local cache, no external data vendor)
+```bash
+# Incremental update from your local/logged-in MT5 terminal
+python scripts/download_mt5_data.py \
+  --symbol XAUUSD --symbol EURUSD \
+  --timeframe M5 --timeframe M15 --timeframe H1 \
+  --from 2015-01-01T00:00:00Z --to now
+
+# Full rebuild (ignore local cache)
+python scripts/download_mt5_data.py --symbol XAUUSD --timeframe M5 --full-refresh
+
+# If your broker has short history, auto-fallback to recent bars (e.g. last 180 days)
+python scripts/download_mt5_data.py --symbol XAUUSD --timeframe M5 --fallback-days 180
+```
+
+Cache metadata is written to `data/.cache/mt5_download/`, and CSVs are updated in `data/`.
+If your broker does not provide long history (e.g., no 2015 data), the script will keep available bars and print a warning with the actual earliest timestamp.
+
+#### E. External Source Download (Yahoo Finance + cache)
+```bash
+# Use external source backend
+python scripts/download_mt5_data.py \
+  --source yfinance \
+  --symbol XAUUSD --symbol EURUSD \
+  --timeframe H1 --timeframe D1 \
+  --from 2018-01-01T00:00:00Z --to now
+
+# Optional symbol mapping override
+python scripts/download_mt5_data.py --source yfinance --symbol XAUUSD --map XAUUSD:XAUUSD=X --timeframe H1
+```
+
 **Expected files:**
 ```
 data/xauusd_m5.csv   (~50-100 MB, 1M+ rows)
@@ -471,7 +502,8 @@ tradingbot/
 │
 ├── 📂 scripts/                  # Utility scripts
 │   ├── fetch_all_data.py       # Download macro data
-│   └── generate_economic_calendar.py # Create event calendar
+│   ├── generate_economic_calendar.py # Create event calendar
+│   └── download_mt5_data.py    # Pull/cached OHLC from local MT5 terminal
 │
 ├── 📂 backtest/                 # Backtesting engine
 │   └── backtest_engine.py      # Full backtest with metrics
