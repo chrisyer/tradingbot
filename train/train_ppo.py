@@ -25,11 +25,17 @@ SAVE_PREFIX = "ppo_xauusd"
 def main():
     os.makedirs(SAVE_DIR, exist_ok=True)
 
-    df, X, r = make_features("data/xauusd_1h.csv", window=WINDOW)
+    df, X_raw, r = make_features("data/xauusd_1h.csv", window=WINDOW, normalize=False)
 
     train_end = np.searchsorted(df["time"].to_numpy(), np.datetime64(TRAIN_END_DATE))
-    X_train, r_train = X[:train_end], r[:train_end]
-    X_test, r_test = X[train_end:], r[train_end:]
+    X_train_raw, r_train = X_raw[:train_end], r[:train_end]
+    X_test_raw, r_test = X_raw[train_end:], r[train_end:]
+
+    # Fit normalization on TRAIN only to avoid test leakage.
+    mu = X_train_raw.mean(axis=0, keepdims=True)
+    sig = X_train_raw.std(axis=0, keepdims=True) + 1e-8
+    X_train = (X_train_raw - mu) / sig
+    X_test = (X_test_raw - mu) / sig
 
     def make_train_env():
         return XAUUSDTradingEnv(

@@ -317,6 +317,51 @@ Creates calendar with 1,500+ major economic events (2015-2025)
 7. Click **Export** → Save as `data/xauusd_m5.csv`
 8. Repeat for **M15** → Save as `data/xauusd_m15.csv`
 
+#### D. Scripted MT5 Download (with local cache, no external data vendor)
+```bash
+# Incremental update from your local/logged-in MT5 terminal
+python scripts/download_mt5_data.py \
+  --symbol XAUUSD --symbol EURUSD \
+  --timeframe M5 --timeframe M15 --timeframe H1 \
+  --from 2015-01-01T00:00:00Z --to now
+
+# Full rebuild (ignore local cache)
+python scripts/download_mt5_data.py --symbol XAUUSD --timeframe M5 --full-refresh
+
+# If your broker has short history, auto-fallback to recent bars (e.g. last 180 days)
+python scripts/download_mt5_data.py --symbol XAUUSD --timeframe M5 --fallback-days 180
+```
+
+Cache metadata is written to `data/.cache/mt5_download/`, and CSVs are updated in `data/`.
+If your broker does not provide long history (e.g., no 2015 data), the script will keep available bars and print a warning with the actual earliest timestamp.
+All downloaded timestamps are normalized to UTC before being written to CSV.
+
+#### E. External Source Download (Yahoo Finance + cache)
+```bash
+# Use external source backend
+python scripts/download_mt5_data.py \
+  --source yfinance \
+  --symbol XAUUSD --symbol EURUSD \
+  --timeframe H1 --timeframe D1 \
+  --from 2018-01-01T00:00:00Z --to now
+
+# Optional symbol mapping override
+python scripts/download_mt5_data.py --source yfinance --symbol XAUUSD --map XAUUSD:XAUUSD=X --timeframe H1
+```
+Using `--source yfinance` or `--source dukascopy` does not require the `MetaTrader5` Python package.
+
+#### F. External Source Download (Dukascopy + cache, free)
+```bash
+python scripts/download_mt5_data.py \
+  --source dukascopy \
+  --symbol XAUUSD --symbol EURUSD \
+  --timeframe M15 --timeframe H1 \
+  --from 2015-01-01T00:00:00Z --to now
+
+# Optional mapping (e.g. ensure instrument naming)
+python scripts/download_mt5_data.py --source dukascopy --symbol XAUUSD --map XAUUSD:XAUUSD --timeframe H1
+```
+
 **Expected files:**
 ```
 data/xauusd_m5.csv   (~50-100 MB, 1M+ rows)
@@ -327,7 +372,19 @@ data/xauusd_m15.csv  (~20-40 MB, 350k+ rows)
 
 ### Step 2: Train the Model
 
-#### Option A: Local Training (Slower but Free)
+#### Option A (Recommended for First Version): PPO Baseline
+```bash
+# Fastest way to get a stable V1 pipeline online first
+python train/train_ppo.py
+```
+
+Use this first if your goal is to validate:
+- Data pipeline
+- Training loop
+- Backtest/evaluation flow
+- Live execution integration
+
+#### Option B: PRO Model (DreamerV3 + 150+ features)
 ```bash
 # Mac with Apple Silicon
 python train/train_ultimate_150.py --steps 1000000 --device mps --batch-size 64
@@ -345,11 +402,11 @@ python train/train_ultimate_150.py --steps 1000000 --device cpu --batch-size 32
 - CPU: 15-20 days (not recommended)
 
 **Monitor progress:**
-- Models saved every 50k steps in `train/ppo_xauusd_[steps]k.zip`
+- PRO checkpoints saved under `train/dreamer_ultimate/`
 - Check training log for rewards and losses
 - Can stop/resume training anytime
 
-#### Option B: Google Colab (Faster, Recommended)
+#### Option C: Google Colab (Faster, Recommended for PRO model)
 1. Upload `colab_train_ultimate_150.ipynb` to Google Drive
 2. Open in Google Colab
 3. Runtime → Change runtime type → GPU (T4 or A100)
@@ -424,6 +481,9 @@ tradingbot/
 │   ├── train_ultimate_150.py   # Main training script (140+ features)
 │   ├── train_god_mode.py       # God mode training (63 features)
 │   ├── train_dreamer.py        # Dreamer V3 training
+│   ├── optuna_optimize_ppo.py  # Hyperparameter optimization (Optuna)
+│   ├── train_multi_asset_ppo.py # Multi-asset PPO training
+│   ├── train_ensemble.py       # Ensemble training/voting workflow
 │   └── ppo_xauusd_*.zip        # Saved model checkpoints
 │
 ├── 📂 features/                 # Feature engineering
@@ -435,6 +495,7 @@ tradingbot/
 │
 ├── 📂 env/                      # Trading environment (RL gym)
 │   ├── xauusd_env.py           # Standard trading environment
+│   ├── multi_asset_env.py      # Multi-asset training wrapper
 │   └── realistic_execution.py  # Realistic slippage/spread simulation
 │
 ├── 📂 models/                   # Advanced RL components
@@ -455,13 +516,18 @@ tradingbot/
 │
 ├── 📂 scripts/                  # Utility scripts
 │   ├── fetch_all_data.py       # Download macro data
-│   └── generate_economic_calendar.py # Create event calendar
+│   ├── generate_economic_calendar.py # Create event calendar
+│   └── download_mt5_data.py    # Pull/cached OHLC from local MT5 terminal
 │
 ├── 📂 backtest/                 # Backtesting engine
 │   └── backtest_engine.py      # Full backtest with metrics
 │
 ├── 📂 monitoring/               # Production monitoring
-│   └── production_monitor.py   # Track live performance
+│   ├── production_monitor.py   # Track live performance
+│   └── web_dashboard.py        # Streamlit monitoring dashboard
+│
+├── 📂 execution/                # Order execution abstractions
+│   └── order_manager.py        # Market/limit/stop-limit order manager
 │
 ├── 📄 live_trade_mt5.py         # Live trading with MT5
 ├── 📄 live_trade_metaapi.py    # Live trading with MetaAPI
@@ -729,6 +795,26 @@ Special thanks to the quantitative trading and RL research communities for shari
 
 ## 🗺️ Roadmap
 
+### Newly Added Workflows (from In Progress)
+
+```bash
+# 1) Optuna hyperparameter search
+python train/optuna_optimize_ppo.py --data data/xauusd_1h.csv --trials 20 --timesteps 75000
+
+# 2) Multi-asset PPO training (repeat --asset)
+python train/train_multi_asset_ppo.py \
+  --asset XAUUSD=data/xauusd_1h.csv \
+  --asset EURUSD=data/eurusd_1h.csv \
+  --asset BTCUSD=data/btcusd_1h.csv \
+  --asset SPX=data/spx_1h.csv
+
+# 3) Ensemble training and majority-vote evaluation
+python train/train_ensemble.py --data data/xauusd_1h.csv --num-models 5
+
+# 4) Monitoring dashboard
+streamlit run monitoring/web_dashboard.py
+```
+
 ### Completed ✅
 - [x] PPO algorithm implementation
 - [x] Dreamer V3 algorithm
@@ -740,11 +826,11 @@ Special thanks to the quantitative trading and RL research communities for shari
 - [x] Risk management system
 
 ### In Progress 🚧
-- [ ] Hyperparameter optimization (Optuna)
-- [ ] Multi-asset support (EURUSD, BTCUSD, SPX)
-- [ ] Ensemble models (combine multiple agents)
-- [ ] Advanced order types (limit, stop-limit)
-- [ ] Web dashboard for monitoring
+- [x] Hyperparameter optimization (Optuna)
+- [x] Multi-asset support (EURUSD, BTCUSD, SPX)
+- [x] Ensemble models (combine multiple agents)
+- [x] Advanced order types (limit, stop-limit)
+- [x] Web dashboard for monitoring
 
 ### Planned 📋
 - [ ] Sentiment analysis from Twitter/Reddit

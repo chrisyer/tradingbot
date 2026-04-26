@@ -13,6 +13,7 @@ This prevents silent failures that cost money.
 
 import logging
 import time
+import json
 from datetime import datetime, timedelta
 from collections import deque
 import numpy as np
@@ -320,6 +321,12 @@ class LiveTradingMonitor:
 
         logger.info(f"📊 Daily reset - P&L: {self.daily_pnl:.4f}")
         self.daily_pnl = 0.0
+
+    def save_snapshot(self, path="monitoring/latest_snapshot.json"):
+        """Persist current statistics for dashboard consumption."""
+        stats = self.get_statistics()
+        with open(path, "w", encoding="utf-8") as f:
+            json.dump(stats, f, indent=2)
 
 
 # Example usage
