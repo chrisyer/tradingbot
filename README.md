@@ -342,13 +342,13 @@ Use this first if your goal is to validate:
 #### Option B: PRO Model (DreamerV3 + 150+ features)
 ```bash
 # Mac with Apple Silicon
-python train/train_pro.py --steps 1000000 --device mps --batch-size 64
+python train/train_ultimate_150.py --steps 1000000 --device mps --batch-size 64
 
 # Windows/Linux with NVIDIA GPU
-python train/train_pro.py --steps 1000000 --device cuda --batch-size 128
+python train/train_ultimate_150.py --steps 1000000 --device cuda --batch-size 128
 
 # CPU only (slowest)
-python train/train_pro.py --steps 1000000 --device cpu --batch-size 32
+python train/train_ultimate_150.py --steps 1000000 --device cpu --batch-size 32
 ```
 
 **Training time:**
@@ -433,7 +433,6 @@ python live_trade_metaapi.py
 tradingbot/
 │
 ├── 📂 train/                    # Training scripts & saved models
-│   ├── train_pro.py            # PRO model entrypoint (aliases ultimate training)
 │   ├── train_ultimate_150.py   # Main training script (140+ features)
 │   ├── train_god_mode.py       # God mode training (63 features)
 │   ├── train_dreamer.py        # Dreamer V3 training
