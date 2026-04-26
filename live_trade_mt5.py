@@ -5,6 +5,7 @@ import MetaTrader5 as mt5
 from datetime import datetime, timedelta
 from stable_baselines3 import PPO
 
+from execution.order_manager import MT5OrderManager, OrderSpec
 from features.make_features import compute_features
 
 # --- CONFIG ---
@@ -14,6 +15,8 @@ VOLUME = 0.01  # Minimum lot size
 DEVIATION = 20
 MODEL_PATH = "train/ppo_xauusd_latest.zip"
 WINDOW = 64
+ORDER_MODE = "market"  # one of: market, limit, stop_limit
+PENDING_OFFSET = 0.20  # price distance in XAUUSD points for pending orders
 
 # Mapping: 0=Flat, 1=Long
 # (If we had Short, it would be mapped here too)
@@ -52,26 +55,41 @@ def execute_trade(action, current_pos_type):
     # Open new position
     if action == 1: # We want to be Long
         print("🟢 Opening Long Position...")
-        open_order(mt5.ORDER_TYPE_BUY)
+        open_order("buy")
 
-def open_order(order_type):
+def open_order(side):
+    manager = MT5OrderManager(mt5)
     tick = mt5.symbol_info_tick(SYMBOL)
-    price = tick.ask if order_type == mt5.ORDER_TYPE_BUY else tick.bid
-    
-    request = {
-        "action": mt5.TRADE_ACTION_DEAL,
-        "symbol": SYMBOL,
-        "volume": VOLUME,
-        "type": order_type,
-        "price": price,
-        "deviation": DEVIATION,
-        "magic": 234000,
-        "comment": "RL_Agent_v1",
-        "type_time": mt5.ORDER_TIME_GTC,
-        "type_filling": mt5.ORDER_FILLING_IOC,
-    }
-    
-    result = mt5.order_send(request)
+    entry = tick.ask if side == "buy" else tick.bid
+
+    if ORDER_MODE == "market":
+        spec = OrderSpec(symbol=SYMBOL, volume=VOLUME, side=side, order_type="market", deviation=DEVIATION)
+    elif ORDER_MODE == "limit":
+        limit_price = entry - PENDING_OFFSET if side == "buy" else entry + PENDING_OFFSET
+        spec = OrderSpec(
+            symbol=SYMBOL,
+            volume=VOLUME,
+            side=side,
+            order_type="limit",
+            deviation=DEVIATION,
+            limit_price=limit_price,
+        )
+    elif ORDER_MODE == "stop_limit":
+        stop_price = entry + PENDING_OFFSET if side == "buy" else entry - PENDING_OFFSET
+        limit_price = entry + (PENDING_OFFSET / 2 if side == "buy" else -PENDING_OFFSET / 2)
+        spec = OrderSpec(
+            symbol=SYMBOL,
+            volume=VOLUME,
+            side=side,
+            order_type="stop_limit",
+            deviation=DEVIATION,
+            stop_price=stop_price,
+            limit_price=limit_price,
+        )
+    else:
+        raise ValueError(f"Unsupported ORDER_MODE={ORDER_MODE}")
+
+    result = manager.send_order(spec)
     print(f"Order Send Result: {result.comment if result else 'Failed'}")
 
 def close_position(position_type):

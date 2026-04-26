@@ -424,6 +424,9 @@ tradingbot/
 │   ├── train_ultimate_150.py   # Main training script (140+ features)
 │   ├── train_god_mode.py       # God mode training (63 features)
 │   ├── train_dreamer.py        # Dreamer V3 training
+│   ├── optuna_optimize_ppo.py  # Hyperparameter optimization (Optuna)
+│   ├── train_multi_asset_ppo.py # Multi-asset PPO training
+│   ├── train_ensemble.py       # Ensemble training/voting workflow
 │   └── ppo_xauusd_*.zip        # Saved model checkpoints
 │
 ├── 📂 features/                 # Feature engineering
@@ -435,6 +438,7 @@ tradingbot/
 │
 ├── 📂 env/                      # Trading environment (RL gym)
 │   ├── xauusd_env.py           # Standard trading environment
+│   ├── multi_asset_env.py      # Multi-asset training wrapper
 │   └── realistic_execution.py  # Realistic slippage/spread simulation
 │
 ├── 📂 models/                   # Advanced RL components
@@ -461,7 +465,11 @@ tradingbot/
 │   └── backtest_engine.py      # Full backtest with metrics
 │
 ├── 📂 monitoring/               # Production monitoring
-│   └── production_monitor.py   # Track live performance
+│   ├── production_monitor.py   # Track live performance
+│   └── web_dashboard.py        # Streamlit monitoring dashboard
+│
+├── 📂 execution/                # Order execution abstractions
+│   └── order_manager.py        # Market/limit/stop-limit order manager
 │
 ├── 📄 live_trade_mt5.py         # Live trading with MT5
 ├── 📄 live_trade_metaapi.py    # Live trading with MetaAPI
@@ -729,6 +737,26 @@ Special thanks to the quantitative trading and RL research communities for shari
 
 ## 🗺️ Roadmap
 
+### Newly Added Workflows (from In Progress)
+
+```bash
+# 1) Optuna hyperparameter search
+python train/optuna_optimize_ppo.py --data data/xauusd_1h.csv --trials 20 --timesteps 75000
+
+# 2) Multi-asset PPO training (repeat --asset)
+python train/train_multi_asset_ppo.py \
+  --asset XAUUSD=data/xauusd_1h.csv \
+  --asset EURUSD=data/eurusd_1h.csv \
+  --asset BTCUSD=data/btcusd_1h.csv \
+  --asset SPX=data/spx_1h.csv
+
+# 3) Ensemble training and majority-vote evaluation
+python train/train_ensemble.py --data data/xauusd_1h.csv --num-models 5
+
+# 4) Monitoring dashboard
+streamlit run monitoring/web_dashboard.py
+```
+
 ### Completed ✅
 - [x] PPO algorithm implementation
 - [x] Dreamer V3 algorithm
@@ -740,11 +768,11 @@ Special thanks to the quantitative trading and RL research communities for shari
 - [x] Risk management system
 
 ### In Progress 🚧
-- [ ] Hyperparameter optimization (Optuna)
-- [ ] Multi-asset support (EURUSD, BTCUSD, SPX)
-- [ ] Ensemble models (combine multiple agents)
-- [ ] Advanced order types (limit, stop-limit)
-- [ ] Web dashboard for monitoring
+- [x] Hyperparameter optimization (Optuna)
+- [x] Multi-asset support (EURUSD, BTCUSD, SPX)
+- [x] Ensemble models (combine multiple agents)
+- [x] Advanced order types (limit, stop-limit)
+- [x] Web dashboard for monitoring
 
 ### Planned 📋
 - [ ] Sentiment analysis from Twitter/Reddit
