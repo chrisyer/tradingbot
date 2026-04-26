@@ -15,7 +15,7 @@ def compute_rsi(series, period=14):
     rsi = 100 - (100 / (1 + rs))
     return rsi.fillna(50.0)
 
-def compute_features(df):
+def compute_features(df, normalize=True, norm_stats=None, return_norm_stats=False):
     df = df.copy()
     
     # 1. Gold Features
@@ -39,7 +39,8 @@ def compute_features(df):
     df["macd_diff"] = df["macd_diff"].fillna(0.0)
 
     # 2. MACRO FEATURES (The "God Mode" Inputs)
-    if "dxy_close" in df.columns:
+    macro_cols = {"dxy_close", "spx_close", "us10y_close"}
+    if macro_cols.issubset(df.columns):
         # DXY Returns
         df["dxy_ret"] = np.log(df["dxy_close"]).diff().fillna(0.0)
         # SPX Returns
@@ -70,13 +71,21 @@ def compute_features(df):
     feats = np.nan_to_num(feats, nan=0.0, posinf=0.0, neginf=0.0)
     rets = np.nan_to_num(rets, nan=0.0, posinf=0.0, neginf=0.0)
 
-    # Normalize
-    mu = feats.mean(axis=0, keepdims=True)
-    sig = feats.std(axis=0, keepdims=True) + 1e-8
-    feats = (feats - mu) / sig
-    
+    stats = None
+    if normalize:
+        if norm_stats is None:
+            mu = feats.mean(axis=0, keepdims=True)
+            sig = feats.std(axis=0, keepdims=True) + 1e-8
+        else:
+            mu, sig = norm_stats
+        feats = (feats - mu) / sig
+        stats = (mu, sig)
+
+    if return_norm_stats:
+        return df, feats, rets, stats
     return df, feats, rets
 
-def make_features(csv_path: str, window: int = 64):
+
+def make_features(csv_path: str, window: int = 64, normalize=True):
     df = load_ohlc_csv(csv_path)
-    return compute_features(df)
+    return compute_features(df, normalize=normalize)
