@@ -11,13 +11,18 @@ from __future__ import annotations
 
 import argparse
 import json
+import lzma
+import struct
+import sys
+from concurrent.futures import ThreadPoolExecutor, as_completed
 from dataclasses import dataclass
-from datetime import datetime, timedelta, timezone
+from datetime import datetime, time, timedelta, timezone
 from pathlib import Path
-from urllib.parse import urlencode
-from urllib.request import urlopen
+from urllib.error import HTTPError, URLError
+from urllib.request import Request, urlopen
 
 import pandas as pd
+from tqdm.auto import tqdm
 
 
 MT5_TIMEFRAME_ATTR = {
@@ -39,6 +44,17 @@ TIMEFRAME_SECONDS = {
     "H4": 4 * 60 * 60,
     "D1": 24 * 60 * 60,
 }
+
+DUKASCOPY_HEADERS = {
+    "User-Agent": (
+        "Mozilla/5.0 (Macintosh; Intel Mac OS X 10_15_7) "
+        "AppleWebKit/537.36 (KHTML, like Gecko) Chrome/124.0 Safari/537.36"
+    ),
+    "Accept": "*/*",
+}
+
+DUKASCOPY_EMPTY_COLUMNS = ["time", "open", "high", "low", "close", "tick_volume"]
+DUKASCOPY_DAY_CACHE: dict[tuple[str, str], bytes | None] = {}
 
 
 @dataclass
@@ -155,98 +171,177 @@ def fetch_range_yfinance(provider_symbol: str, timeframe: str, start_dt: datetim
     return df[[c for c in keep if c in df.columns]].dropna(subset=["time"]).sort_values("time").drop_duplicates("time").reset_index(drop=True)
 
 
-def _coerce_dukascopy_row(row) -> dict | None:
-    if isinstance(row, dict):
-        t = row.get("time", row.get("timestamp", row.get("ts", row.get("ctm"))))
-        o = row.get("open", row.get("o"))
-        h = row.get("high", row.get("h"))
-        l = row.get("low", row.get("l"))
-        c = row.get("close", row.get("c"))
-        v = row.get("volume", row.get("v", row.get("vol", 0)))
-    elif isinstance(row, list) and len(row) >= 5:
-        t = row[0]
-        o, h, l, c = row[1], row[2], row[3], row[4]
-        v = row[5] if len(row) > 5 else 0
-    else:
-        return None
-
-    if t is None or o is None or h is None or l is None or c is None:
-        return None
-    return {"time": t, "open": o, "high": h, "low": l, "close": c, "tick_volume": v}
+def _empty_dukascopy_frame() -> pd.DataFrame:
+    return pd.DataFrame(columns=DUKASCOPY_EMPTY_COLUMNS)
 
 
-def fetch_range_dukascopy(provider_symbol: str, timeframe: str, start_dt: datetime, end_dt: datetime) -> pd.DataFrame:
+def _dukascopy_instrument(provider_symbol: str) -> str:
+    return provider_symbol.replace("/", "").upper()
+
+
+def _dukascopy_price_scale(instrument: str) -> int:
+    # Dukascopy stores most FX pairs in 1/100000 units, while JPY crosses and
+    # metals use 1/1000 units in the candle feed.
+    if instrument.endswith("JPY") or instrument.startswith(("XAU", "XAG")):
+        return 1_000
+    return 100_000
+
+
+def _dukascopy_day_url(instrument: str, day: datetime) -> str:
+    return (
+        f"https://datafeed.dukascopy.com/datafeed/{instrument}/"
+        f"{day.year:04d}/{day.month - 1:02d}/{day.day:02d}/BID_candles_min_1.bi5"
+    )
+
+
+def _download_dukascopy_day(instrument: str, day: datetime) -> bytes | None:
+    cache_key = (instrument, day.strftime("%Y-%m-%d"))
+    if cache_key in DUKASCOPY_DAY_CACHE:
+        return DUKASCOPY_DAY_CACHE[cache_key]
+
+    url = _dukascopy_day_url(instrument, day)
+    request = Request(url, headers=DUKASCOPY_HEADERS)
+    try:
+        with urlopen(request, timeout=30) as resp:
+            raw = resp.read()
+            DUKASCOPY_DAY_CACHE[cache_key] = raw
+            return raw
+    except HTTPError as exc:
+        if exc.code == 404:
+            DUKASCOPY_DAY_CACHE[cache_key] = None
+            return None
+        raise RuntimeError(f"Dukascopy rejected {instrument} request ({exc.code}) for {day.date()}: {url}") from exc
+    except URLError as exc:
+        raise RuntimeError(f"Dukascopy download failed for {instrument} {day.date()}: {exc}") from exc
+
+
+def _parse_dukascopy_minute_bi5(raw: bytes, instrument: str, day: datetime) -> list[dict]:
+    if not raw:
+        return []
+
+    try:
+        payload = lzma.decompress(raw)
+    except lzma.LZMAError as exc:
+        raise RuntimeError(f"Could not decompress Dukascopy candle file for {instrument} {day.date()}") from exc
+
+    record_size = struct.calcsize(">Iiiiif")
+    if len(payload) % record_size != 0:
+        raise RuntimeError(
+            f"Unexpected Dukascopy candle record size for {instrument} {day.date()}: "
+            f"{len(payload)} bytes"
+        )
+
+    day_start = datetime.combine(day.date(), time.min, tzinfo=timezone.utc)
+    price_scale = _dukascopy_price_scale(instrument)
+    rows = []
+    for offset_seconds, open_raw, high_raw, low_raw, close_raw, volume in struct.iter_unpack(">Iiiiif", payload):
+        rows.append(
+            {
+                "time": (day_start + timedelta(seconds=int(offset_seconds))).replace(tzinfo=None),
+                "open": open_raw / price_scale,
+                "high": high_raw / price_scale,
+                "low": low_raw / price_scale,
+                "close": close_raw / price_scale,
+                "tick_volume": volume,
+            }
+        )
+    return rows
+
+
+def _iter_utc_days(start_dt: datetime, end_dt: datetime):
+    current = datetime.combine(start_dt.date(), time.min, tzinfo=timezone.utc)
+    last = datetime.combine(end_dt.date(), time.min, tzinfo=timezone.utc)
+    while current <= last:
+        yield current
+        current += timedelta(days=1)
+
+
+def _utc_day_count(start_dt: datetime, end_dt: datetime) -> int:
+    return (end_dt.date() - start_dt.date()).days + 1
+
+
+def fetch_range_dukascopy(
+    provider_symbol: str,
+    timeframe: str,
+    start_dt: datetime,
+    end_dt: datetime,
+    show_progress: bool = True,
+    progress_label: str | None = None,
+    max_workers: int = 8,
+) -> pd.DataFrame:
     if timeframe not in TIMEFRAME_SECONDS:
         raise ValueError(f"Unsupported timeframe for dukascopy: {timeframe}")
-    interval_min = int(TIMEFRAME_SECONDS[timeframe] // 60)
-    instrument = provider_symbol.replace("/", "").upper()
-    current_end_ms = int(end_dt.timestamp() * 1000)
-    start_ms = int(start_dt.timestamp() * 1000)
+    if timeframe == "D1":
+        resample_rule = "1D"
+    else:
+        interval_min = int(TIMEFRAME_SECONDS[timeframe] // 60)
+        resample_rule = f"{interval_min}min"
+
+    instrument = _dukascopy_instrument(provider_symbol)
     rows = []
+    days = list(_iter_utc_days(start_dt, end_dt))
+    progress = None
+    if show_progress:
+        label = progress_label or f"{instrument} {timeframe}"
+        progress = tqdm(
+            total=len(days),
+            desc=f"Dukascopy {label}",
+            unit="day",
+            dynamic_ncols=True,
+            leave=False,
+            disable=not sys.stderr.isatty(),
+        )
 
-    # Pull backward chunks until we cover requested start.
-    for _ in range(30):
-        params = {
-            "path": "chart/json3",
-            "instrument": instrument,
-            "offer_side": "BID",
-            "interval": str(interval_min),
-            "splits": "true",
-            "time_direction": "P",
-            "timestamp": str(current_end_ms),
-        }
-        url = f"https://freeserv.dukascopy.com/2.0/index.php?{urlencode(params)}"
-        with urlopen(url, timeout=30) as resp:
-            payload = resp.read().decode("utf-8", errors="replace").strip()
-
-        try:
-            chunk = json.loads(payload)
-        except json.JSONDecodeError:
-            # Some endpoints may return prefixed text; try to recover array/object.
-            left = min([i for i in [payload.find("["), payload.find("{")] if i >= 0], default=-1)
-            right = max(payload.rfind("]"), payload.rfind("}"))
-            if left < 0 or right < 0:
-                chunk = []
-            else:
-                chunk = json.loads(payload[left : right + 1])
-
-        if not chunk:
-            break
-
-        normalized = []
-        for raw in chunk:
-            one = _coerce_dukascopy_row(raw)
-            if one is not None:
-                normalized.append(one)
-        if not normalized:
-            break
-
-        rows.extend(normalized)
-        chunk_df = pd.DataFrame(normalized)
-        chunk_df["time"] = pd.to_numeric(chunk_df["time"], errors="coerce")
-        chunk_df = chunk_df.dropna(subset=["time"])
-        if chunk_df.empty:
-            break
-
-        oldest_ms = int(chunk_df["time"].min())
-        if oldest_ms <= start_ms:
-            break
-        # move back one bar
-        current_end_ms = oldest_ms - (TIMEFRAME_SECONDS[timeframe] * 1000)
+    try:
+        if max_workers <= 1 or len(days) <= 1:
+            for day in days:
+                raw = _download_dukascopy_day(instrument, day)
+                if raw is not None:
+                    rows.extend(_parse_dukascopy_minute_bi5(raw, instrument, day))
+                if progress is not None:
+                    progress.update(1)
+        else:
+            workers = min(max_workers, len(days))
+            with ThreadPoolExecutor(max_workers=workers) as executor:
+                futures = {executor.submit(_download_dukascopy_day, instrument, day): day for day in days}
+                for future in as_completed(futures):
+                    day = futures[future]
+                    raw = future.result()
+                    if raw is not None:
+                        rows.extend(_parse_dukascopy_minute_bi5(raw, instrument, day))
+                    if progress is not None:
+                        progress.update(1)
+    finally:
+        if progress is not None:
+            progress.close()
 
     if not rows:
-        return pd.DataFrame(columns=["time", "open", "high", "low", "close", "tick_volume"])
+        return _empty_dukascopy_frame()
 
     df = pd.DataFrame(rows)
-    # Accept epoch in seconds or milliseconds.
-    numeric_time = pd.to_numeric(df["time"], errors="coerce")
-    unit = "ms" if numeric_time.dropna().max() > 10_000_000_000 else "s"
-    df["time"] = to_utc_naive(numeric_time, unit=unit)
-    for col in ["open", "high", "low", "close", "tick_volume"]:
-        if col in df.columns:
-            df[col] = pd.to_numeric(df[col], errors="coerce")
+    df["time"] = to_utc_naive(df["time"])
     df = df.dropna(subset=["time", "open", "high", "low", "close"])
     df = df[(df["time"] >= start_dt.replace(tzinfo=None)) & (df["time"] <= end_dt.replace(tzinfo=None))]
+    if df.empty:
+        return _empty_dukascopy_frame()
+
+    if timeframe != "M1":
+        df = (
+            df.set_index("time")
+            .resample(resample_rule, label="left", closed="left")
+            .agg(
+                {
+                    "open": "first",
+                    "high": "max",
+                    "low": "min",
+                    "close": "last",
+                    "tick_volume": "sum",
+                }
+            )
+            .dropna(subset=["open", "high", "low", "close"])
+            .reset_index()
+        )
+
     return df.sort_values("time").drop_duplicates("time").reset_index(drop=True)
 
 
@@ -259,6 +354,8 @@ def incremental_update(
     full_refresh: bool,
     fallback_days: int,
     source: str,
+    show_progress: bool,
+    dukascopy_workers: int,
     mt5=None,
 ) -> None:
     csv_path = out_dir / target.output_filename
@@ -278,7 +375,15 @@ def incremental_update(
     elif source == "yfinance":
         fetched = fetch_range_yfinance(provider_symbol, target.timeframe, effective_from, to_dt)
     else:
-        fetched = fetch_range_dukascopy(provider_symbol, target.timeframe, effective_from, to_dt)
+        fetched = fetch_range_dukascopy(
+            provider_symbol,
+            target.timeframe,
+            effective_from,
+            to_dt,
+            show_progress=show_progress,
+            progress_label=f"{target.symbol} {target.timeframe}",
+            max_workers=dukascopy_workers,
+        )
     if fetched.empty and fallback_days > 0:
         fallback_from = to_dt - timedelta(days=fallback_days)
         print(
@@ -290,7 +395,15 @@ def incremental_update(
         elif source == "yfinance":
             fetched = fetch_range_yfinance(provider_symbol, target.timeframe, fallback_from, to_dt)
         else:
-            fetched = fetch_range_dukascopy(provider_symbol, target.timeframe, fallback_from, to_dt)
+            fetched = fetch_range_dukascopy(
+                provider_symbol,
+                target.timeframe,
+                fallback_from,
+                to_dt,
+                show_progress=show_progress,
+                progress_label=f"{target.symbol} {target.timeframe} fallback",
+                max_workers=dukascopy_workers,
+            )
     if existing is None:
         merged = fetched
     else:
@@ -328,20 +441,27 @@ def incremental_update(
 
 def parse_args():
     parser = argparse.ArgumentParser(description="Download market bars from local MT5 terminal with cache")
-    parser.add_argument("--symbol", action="append", default=["XAUUSD"], help="Repeatable symbol, e.g. --symbol XAUUSD --symbol EURUSD")
+    parser.add_argument("--symbol", action="append", default=None, help="Repeatable symbol, e.g. --symbol XAUUSD --symbol EURUSD")
     parser.add_argument(
         "--map",
         action="append",
         default=[],
         help="Optional source mapping in form SYMBOL:PROVIDER_SYMBOL, e.g. XAUUSD:GC=F",
     )
-    parser.add_argument("--timeframe", action="append", default=["M5", "M15"], help="Repeatable timeframe: M1/M5/M15/M30/H1/H4/D1")
+    parser.add_argument("--timeframe", action="append", default=None, help="Repeatable timeframe: M1/M5/M15/M30/H1/H4/D1")
     parser.add_argument("--from", dest="from_dt", default="2015-01-01T00:00:00Z", help="UTC start datetime, e.g. 2018-01-01T00:00:00Z")
     parser.add_argument("--to", dest="to_dt", default="now", help="UTC end datetime or 'now'")
     parser.add_argument("--out-dir", default="data", help="Output CSV directory")
     parser.add_argument("--cache-dir", default="data/.cache/mt5_download", help="Metadata cache directory")
     parser.add_argument("--full-refresh", action="store_true", help="Ignore local CSV cache and rebuild from --from")
     parser.add_argument("--source", choices=["mt5", "yfinance", "dukascopy"], default="mt5", help="Data source backend")
+    parser.add_argument("--no-progress", action="store_true", help="Disable Dukascopy download progress bars")
+    parser.add_argument(
+        "--dukascopy-workers",
+        type=int,
+        default=8,
+        help="Concurrent Dukascopy day downloads (default: 8, use 1 for serial)",
+    )
     parser.add_argument(
         "--fallback-days",
         type=int,
@@ -353,8 +473,8 @@ def parse_args():
 
 def main():
     args = parse_args()
-    symbols = [s.upper() for s in args.symbol]
-    timeframes = [t.upper() for t in args.timeframe]
+    symbols = [s.upper() for s in (args.symbol or ["XAUUSD"])]
+    timeframes = [t.upper() for t in (args.timeframe or ["M5", "M15"])]
 
     for tf in timeframes:
         if tf not in TIMEFRAME_SECONDS:
@@ -364,6 +484,8 @@ def main():
     to_dt = parse_dt(args.to_dt)
     if from_dt >= to_dt:
         raise ValueError("--from must be earlier than --to")
+    if args.dukascopy_workers < 1:
+        raise ValueError("--dukascopy-workers must be >= 1")
 
     provider_map = {}
     for item in args.map:
@@ -372,11 +494,16 @@ def main():
         local_symbol, provider_symbol = item.split(":", 1)
         provider_map[local_symbol.strip().upper()] = provider_symbol.strip()
 
-    default_provider_map = {
+    default_yfinance_map = {
         "XAUUSD": "GC=F",
         "EURUSD": "EURUSD=X",
         "BTCUSD": "BTC-USD",
         "SPX": "^GSPC",
+    }
+    default_dukascopy_map = {
+        "XAUUSD": "XAUUSD",
+        "EURUSD": "EURUSD",
+        "BTCUSD": "BTCUSD",
     }
 
     mt5_ready = False
@@ -391,7 +518,8 @@ def main():
         for symbol in symbols:
             if args.source == "mt5" and not mt5.symbol_select(symbol, True):
                 raise RuntimeError(f"Cannot select symbol in MT5 Market Watch: {symbol}")
-            provider_symbol = provider_map.get(symbol, default_provider_map.get(symbol, symbol))
+            source_default_map = default_yfinance_map if args.source == "yfinance" else default_dukascopy_map
+            provider_symbol = provider_map.get(symbol, source_default_map.get(symbol, symbol))
             for tf in timeframes:
                 incremental_update(
                     DownloadTarget(symbol=symbol, timeframe=tf, provider_symbol=provider_symbol),
@@ -402,6 +530,8 @@ def main():
                     full_refresh=args.full_refresh,
                     fallback_days=args.fallback_days,
                     source=args.source,
+                    show_progress=not args.no_progress,
+                    dukascopy_workers=args.dukascopy_workers,
                     mt5=mt5,
                 )
     finally:

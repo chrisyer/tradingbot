@@ -194,6 +194,8 @@ def load_timeframe_data(filepath):
     df['time'] = pd.to_datetime(df['time'])
     df = df.set_index('time')
     df = df.sort_index()
+    if 'volume' not in df.columns and 'tick_volume' in df.columns:
+        df = df.rename(columns={'tick_volume': 'volume'})
 
     # Ensure we have required columns
     required = ['open', 'high', 'low', 'close', 'volume']
@@ -254,9 +256,9 @@ def load_and_compute_all_timeframes(base_timeframe='M5', data_dir='data'):
     timeframe_files = {
         'M5': 'xauusd_m5.csv',
         'M15': 'xauusd_m15.csv',
-        'H1': 'xauusd_h1_from_m1.csv',
-        'H4': 'xauusd_h4_from_m1.csv',
-        'D1': 'xauusd_d1_from_m1.csv',
+        'H1': 'xauusd_h1.csv',
+        'H4': 'xauusd_h4.csv',
+        'D1': 'xauusd_d1.csv',
         'W1': 'xauusd_w1.csv',  # Optional - will skip if not found
     }
 

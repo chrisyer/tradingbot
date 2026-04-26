@@ -89,3 +89,71 @@ def compute_features(df, normalize=True, norm_stats=None, return_norm_stats=Fals
 def make_features(csv_path: str, window: int = 64, normalize=True):
     df = load_ohlc_csv(csv_path)
     return compute_features(df, normalize=normalize)
+
+
+def _load_aux_ohlc(path):
+    df = load_ohlc_csv(path)
+    df = df.sort_values("time").reset_index(drop=True)
+    return df
+
+
+def _compute_regime_columns(df, prefix):
+    out = pd.DataFrame({"time": df["time"]})
+    close = df["close"].astype(float)
+    ret = np.log(close).diff().fillna(0.0)
+
+    ma_fast = close.rolling(10).mean()
+    ma_slow = close.rolling(50).mean()
+    out[f"{prefix}_ma_diff"] = ((ma_fast - ma_slow) / close).fillna(0.0)
+    out[f"{prefix}_trend"] = np.where(ma_fast > ma_slow, 1.0, -1.0)
+    out[f"{prefix}_mom_5"] = close.pct_change(5).fillna(0.0)
+    out[f"{prefix}_mom_20"] = close.pct_change(20).fillna(0.0)
+    out[f"{prefix}_vol_20"] = ret.rolling(20).std().fillna(0.0)
+    return out
+
+
+def _merge_asof_features(base_df, feature_df):
+    return pd.merge_asof(
+        base_df.sort_values("time"),
+        feature_df.sort_values("time"),
+        on="time",
+        direction="backward",
+    )
+
+
+def make_regime_features(csv_path: str, data_dir: str = "data", window: int = 64, normalize=True):
+    """Basic H1 features plus lightweight higher-timeframe and macro regime state."""
+    base = load_ohlc_csv(csv_path)
+    enriched = base.sort_values("time").reset_index(drop=True)
+
+    for tf_name, filename in [("h4", "xauusd_h4.csv"), ("d1", "xauusd_d1.csv")]:
+        aux = _load_aux_ohlc(f"{data_dir}/{filename}")
+        enriched = _merge_asof_features(enriched, _compute_regime_columns(aux, tf_name))
+
+    for macro_name, filename in [
+        ("dxy", "dxy_daily.csv"),
+        ("us10y", "us10y_daily.csv"),
+        ("vix", "vix_daily.csv"),
+    ]:
+        macro = _load_aux_ohlc(f"{data_dir}/{filename}")
+        enriched = _merge_asof_features(enriched, _compute_regime_columns(macro, macro_name))
+
+    enriched = enriched.fillna(0.0)
+    df, feats, rets = compute_features(enriched, normalize=False)
+
+    regime_cols = [
+        c
+        for c in df.columns
+        if c.startswith(("h4_", "d1_", "dxy_", "us10y_", "vix_"))
+        and c not in {"dxy_close", "us10y_close"}
+    ]
+    regime_feats = df[regime_cols].to_numpy(dtype=np.float32)
+    regime_feats = np.nan_to_num(regime_feats, nan=0.0, posinf=0.0, neginf=0.0)
+    feats = np.concatenate([feats, regime_feats], axis=1).astype(np.float32)
+
+    if normalize:
+        mu = feats.mean(axis=0, keepdims=True)
+        sig = feats.std(axis=0, keepdims=True) + 1e-8
+        feats = (feats - mu) / sig
+
+    return df, feats, rets

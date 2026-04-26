@@ -79,7 +79,7 @@ def make_ultimate_features(base_timeframe='M5', data_dir='data'):
     base_data_file = {
         'M5': 'xauusd_m5.csv',
         'M15': 'xauusd_m15.csv',
-        'H1': 'xauusd_h1_from_m1.csv',
+        'H1': 'xauusd_h1.csv',
     }.get(base_timeframe, 'xauusd_m5.csv')
 
     df_gold = pd.read_csv(f"{data_dir}/{base_data_file}")
@@ -97,7 +97,7 @@ def make_ultimate_features(base_timeframe='M5', data_dir='data'):
 
     from features.calendar_features import load_economic_calendar, compute_calendar_features
 
-    calendar = load_economic_calendar(filepath=f"{data_dir}/economic_events_2015_2025.json")
+    calendar = load_economic_calendar(filepath=f"{data_dir}/economic_events.json")
 
     # Use the base timeframe index
     base_index = tf_features[base_timeframe].index

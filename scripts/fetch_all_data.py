@@ -14,11 +14,11 @@ All FREE data sources, no API keys needed for basics.
 """
 
 import pandas as pd
-import numpy as np
 import yfinance as yf
-from datetime import datetime, timedelta
+from datetime import datetime, timezone
 import logging
 import os
+import argparse
 
 logging.basicConfig(level=logging.INFO)
 logger = logging.getLogger(__name__)
@@ -40,20 +40,32 @@ def fetch_yahoo_data(symbol, start_date, end_date, name):
     logger.info(f"📥 Fetching {name} ({symbol})...")
 
     try:
-        ticker = yf.Ticker(symbol)
-        df = ticker.history(start=start_date, end=end_date, interval='1d')
+        df = yf.download(
+            symbol,
+            start=start_date,
+            end=end_date,
+            interval='1d',
+            auto_adjust=False,
+            progress=False,
+            threads=False,
+        )
 
         if len(df) == 0:
             logger.warning(f"⚠️ No data returned for {name}")
             return None
+
+        if isinstance(df.columns, pd.MultiIndex):
+            df.columns = [c[0] for c in df.columns]
 
         # Rename columns to lowercase
         df = df.reset_index()
         df.columns = [c.lower() for c in df.columns]
 
         # Select relevant columns
-        df = df[['date', 'open', 'high', 'low', 'close', 'volume']]
-        df = df.rename(columns={'date': 'time'})
+        date_col = 'date' if 'date' in df.columns else 'datetime'
+        df = df[[date_col, 'open', 'high', 'low', 'close', 'volume']]
+        df = df.rename(columns={date_col: 'time'})
+        df['time'] = pd.to_datetime(df['time'], utc=True).dt.tz_localize(None)
 
         logger.info(f"   ✅ {name}: {len(df)} bars from {df['time'].iloc[0]} to {df['time'].iloc[-1]}")
 
@@ -101,6 +113,16 @@ def fetch_us_dollar_index(start_date, end_date):
     return fetch_yahoo_data('DX-Y.NYB', start_date, end_date, 'US Dollar Index')
 
 
+def fetch_spx(start_date, end_date):
+    """Fetch S&P 500 index"""
+    return fetch_yahoo_data('^GSPC', start_date, end_date, 'S&P 500')
+
+
+def fetch_us10y(start_date, end_date):
+    """Fetch 10-year Treasury yield index from Yahoo (^TNX, quoted in percent)."""
+    return fetch_yahoo_data('^TNX', start_date, end_date, 'US 10Y Treasury Yield')
+
+
 def align_to_hourly(df_daily, df_hourly_reference):
     """
     Align daily data to hourly frequency by forward-filling
@@ -128,13 +150,26 @@ def align_to_hourly(df_daily, df_hourly_reference):
     return df_aligned.reset_index()
 
 
+def parse_args():
+    parser = argparse.ArgumentParser(description="Download daily macro market data from Yahoo Finance")
+    parser.add_argument("--start", default="2015-01-01", help="Start date YYYY-MM-DD")
+    parser.add_argument(
+        "--end",
+        default=datetime.now(timezone.utc).strftime("%Y-%m-%d"),
+        help="End date YYYY-MM-DD (Yahoo end is exclusive)",
+    )
+    parser.add_argument("--data-dir", default="data", help="Directory to write CSV files")
+    return parser.parse_args()
+
+
 def main():
     """Main function to fetch all data"""
 
     # Configuration
-    START_DATE = '2015-11-17'
-    END_DATE = '2025-12-17'
-    DATA_DIR = 'data'
+    args = parse_args()
+    START_DATE = args.start
+    END_DATE = args.end
+    DATA_DIR = args.data_dir
 
     os.makedirs(DATA_DIR, exist_ok=True)
 
@@ -147,41 +182,23 @@ def main():
     # Dictionary to store all data
     datasets = {}
 
-    # 1. VIX (Fear Index)
-    vix = fetch_vix(START_DATE, END_DATE)
-    if vix is not None:
-        vix.to_csv(f'{DATA_DIR}/vix_daily.csv', index=False)
-        datasets['VIX'] = vix
+    sources = [
+        ("DXY", "dxy_daily.csv", fetch_us_dollar_index),
+        ("SPX", "spx_daily.csv", fetch_spx),
+        ("US10Y", "us10y_daily.csv", fetch_us10y),
+        ("VIX", "vix_daily.csv", fetch_vix),
+        ("OIL", "oil_wti_daily.csv", fetch_oil),
+        ("BTC", "bitcoin_daily.csv", fetch_bitcoin),
+        ("EURUSD", "eurusd_daily.csv", fetch_eurusd),
+        ("SILVER", "silver_daily.csv", fetch_silver),
+        ("GLD", "gld_etf_daily.csv", fetch_gld_holdings),
+    ]
 
-    # 2. Oil (WTI Crude)
-    oil = fetch_oil(START_DATE, END_DATE)
-    if oil is not None:
-        oil.to_csv(f'{DATA_DIR}/oil_wti_daily.csv', index=False)
-        datasets['OIL'] = oil
-
-    # 3. Bitcoin
-    btc = fetch_bitcoin(START_DATE, END_DATE)
-    if btc is not None:
-        btc.to_csv(f'{DATA_DIR}/bitcoin_daily.csv', index=False)
-        datasets['BTC'] = btc
-
-    # 4. EURUSD
-    eur = fetch_eurusd(START_DATE, END_DATE)
-    if eur is not None:
-        eur.to_csv(f'{DATA_DIR}/eurusd_daily.csv', index=False)
-        datasets['EURUSD'] = eur
-
-    # 5. Silver
-    silver = fetch_silver(START_DATE, END_DATE)
-    if silver is not None:
-        silver.to_csv(f'{DATA_DIR}/silver_daily.csv', index=False)
-        datasets['SILVER'] = silver
-
-    # 6. GLD ETF
-    gld = fetch_gld_holdings(START_DATE, END_DATE)
-    if gld is not None:
-        gld.to_csv(f'{DATA_DIR}/gld_etf_daily.csv', index=False)
-        datasets['GLD'] = gld
+    for name, filename, fetcher in sources:
+        df = fetcher(START_DATE, END_DATE)
+        if df is not None:
+            df.to_csv(f'{DATA_DIR}/{filename}', index=False)
+            datasets[name] = df
 
     # Summary
     logger.info("\n" + "="*70)
@@ -189,27 +206,11 @@ def main():
     logger.info("="*70)
 
     for name, df in datasets.items():
-        logger.info(f"✅ {name:15} {len(df):6,} bars → data/{name.lower()}_daily.csv")
+        logger.info(f"✅ {name:15} {len(df):6,} bars")
 
-    logger.info(f"\n✅ Successfully downloaded {len(datasets)}/{6} datasets")
+    logger.info(f"\n✅ Successfully downloaded {len(datasets)}/{len(sources)} datasets")
 
-    # Next steps
-    logger.info("\n" + "="*70)
-    logger.info("📋 NEXT STEPS")
-    logger.info("="*70)
-    logger.info("""
-1. ✅ These files are saved in data/ directory
-2. ⏳ Waiting for YOU to provide:
-   - M5 XAUUSD data (from MT5)
-   - M15 XAUUSD data (from MT5)
-
-3. 🔜 I will create:
-   - Economic calendar JSON
-   - Data integration pipeline
-   - Updated God Mode features with ALL data
-
-4. 🚀 Then we train the ULTIMATE model!
-    """)
+    logger.info("\nFiles are ready for features.macro_features.load_macro_data().")
 
     return datasets
 

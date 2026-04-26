@@ -98,13 +98,15 @@ def compute_volume_features(df):
 
     result = pd.DataFrame(index=df.index)
 
-    if 'volume' not in df.columns:
+    if 'volume' in df.columns:
+        volume = df['volume']
+    elif 'tick_volume' in df.columns:
+        volume = df['tick_volume']
+    else:
         logger.warning("⚠️  No volume column found, using defaults")
         result['volume_profile'] = 0.5
         result['volume_imbalance'] = 0.0
         return result
-
-    volume = df['volume']
 
     # Feature 1: Volume profile (percentile rank)
     # Rolling 100-period percentile

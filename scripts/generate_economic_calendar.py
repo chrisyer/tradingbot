@@ -13,7 +13,8 @@ This is a RULE-BASED generator for scheduled events.
 """
 
 import json
-from datetime import datetime, timedelta
+import argparse
+from datetime import datetime, timedelta, timezone
 from dateutil.relativedelta import relativedelta
 import calendar
 import logging
@@ -270,17 +271,27 @@ def generate_complete_calendar(start_year=2015, end_year=2025):
 
 def main():
     """Main function"""
+    parser = argparse.ArgumentParser(description="Generate rule-based USD economic event calendar")
+    parser.add_argument("--start-year", type=int, default=2015)
+    parser.add_argument("--end-year", type=int, default=datetime.now(timezone.utc).year)
+    parser.add_argument("--output", default="data/economic_events.json")
+    args = parser.parse_args()
 
     # Generate calendar
-    events = generate_complete_calendar(2015, 2025)
+    events = generate_complete_calendar(args.start_year, args.end_year)
 
     # Save to JSON
-    output_file = 'data/economic_events_2015_2025.json'
+    output_file = args.output
 
     with open(output_file, 'w') as f:
         json.dump(events, f, indent=2)
 
     logger.info(f"\n✅ Economic calendar saved to: {output_file}")
+    dated_output = f"data/economic_events_{args.start_year}_{args.end_year}.json"
+    if dated_output != output_file:
+        with open(dated_output, 'w') as f:
+            json.dump(events, f, indent=2)
+        logger.info(f"✅ Economic calendar copy saved to: {dated_output}")
 
     logger.info("\n" + "="*70)
     logger.info("📋 NEXT STEPS")
